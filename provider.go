@@ -89,6 +89,9 @@ func (p *Provider) SetRecords(ctx context.Context, zone string, recs []libdns.Re
 		}
 		switch len(res.Result) {
 		case 0:
+			if rr.Data == "" {
+				return recs, nil // No record to create
+			}
 			body, err := p.getParam(rr)
 			if err != nil {
 				return nil, fmt.Errorf("error creating new record param for %s: %w", rr.Name, err)
@@ -102,6 +105,13 @@ func (p *Provider) SetRecords(ctx context.Context, zone string, recs []libdns.Re
 			}
 			p.recordCache[rr.Name] = response.ID
 		case 1:
+			if rr.Data == "" {
+				records, err := p.DeleteRecords(ctx, zone, recs)
+				if err != nil {
+					return nil, fmt.Errorf("error deleting record %s zoneId in zone %s zoneId: %w", rr.Name, zone, err)
+				}
+				return records, nil
+			}
 			body, err := p.getParam(rr)
 			if err != nil {
 				return nil, fmt.Errorf("error creating update record param for %s: %w", rr.Name, err)
