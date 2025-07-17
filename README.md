@@ -1,4 +1,4 @@
 # How to use
 ```bash
-go get -u github.com/zxspirit/cflibdns@v0.0.2
+go get -u github.com/zxspirit/cflibdns@v0.0.3
 ```
