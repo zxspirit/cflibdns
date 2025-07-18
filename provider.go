@@ -13,178 +13,217 @@ import (
 )
 
 // New creates a new Provider instance with a Cloudflare client and caches for zones and records.
-func New() *Provider {
-	return &Provider{
-		client:      cloudflare.NewClient(option.WithAPIToken(os.Getenv("CLOUDFLARE_API_TOKEN"))),
-		zoneCache:   make(map[string]string),
-		recordCache: make(map[string]string),
+func New() (*Provider, error) {
+
+	p := &Provider{
+		client: cloudflare.NewClient(option.WithAPIToken(os.Getenv("CLOUDFLARE_API_TOKEN"))),
+		cache:  cache{make([]*zone, 0)},
 	}
+	if err := p.InitCache(context.Background()); err != nil {
+		return nil, fmt.Errorf("error initializing cache: %w", err)
+	}
+
+	return p, nil
 }
 
 type Provider struct {
-	client      *cloudflare.Client
-	zoneCache   map[string]string
-	recordCache map[string]string
+	client *cloudflare.Client
+	cache  cache
 }
 
-func (p *Provider) ListZones(ctx context.Context) ([]libdns.Zone, error) {
-	res, err := p.client.Zones.List(ctx, zones.ZoneListParams{
-		Status: cloudflare.F(zones.ZoneListParamsStatusActive),
-	})
+func (p *Provider) InitCache(ctx context.Context) error {
+	res, err := p.client.Zones.List(ctx, zones.ZoneListParams{Status: cloudflare.F(zones.ZoneListParamsStatusActive)})
 	if err != nil {
-		return nil, fmt.Errorf("error listing zones: %w", err)
+		return fmt.Errorf("error listing zones: %w", err)
 	}
-	z := make([]libdns.Zone, 0, len(res.Result))
-	for _, zone := range res.Result {
-		z = append(z, libdns.Zone{
-			Name: zone.Name,
+	for _, z := range res.Result {
+		records := make([]*record, 0)
+		z2 := &zone{
+			id:      z.ID,
+			name:    z.Name,
+			records: records,
+		}
+		p.cache.addZone(z2)
+		list, err := p.client.DNS.Records.List(ctx, dns.RecordListParams{
+			ZoneID: cloudflare.F(z.ID),
 		})
-		p.zoneCache[zone.Name] = zone.ID
-		p.zoneCache[zone.Name+"."] = zone.ID
+		if err != nil {
+			return fmt.Errorf("error listing records for zone %s: %w", z.Name, err)
+		}
+		for _, rec := range list.Result {
+			z2.addRecord(&record{
+				id:      rec.ID,
+				content: rec.Content,
+				name:    rec.Name,
+				dnsType: string(rec.Type),
+				ttl:     time.Duration(rec.TTL),
+			})
+		}
+	}
+	return nil
+}
+
+func (p *Provider) ListZones(_ context.Context) ([]libdns.Zone, error) {
+	allZones := p.cache.getAllZones()
+	z := make([]libdns.Zone, 0, len(p.cache.zones))
+	for _, zc := range allZones {
+		z = append(z, libdns.Zone{Name: zc.name})
 	}
 	return z, nil
 }
 
 func (p *Provider) DeleteRecords(ctx context.Context, zone string, recs []libdns.Record) ([]libdns.Record, error) {
-	for _, rec := range recs {
-		rr := rec.RR()
-		s, ok := p.recordCache[rr.Name]
-		if !ok {
-			return nil, fmt.Errorf("record not found: %s", rr.Name)
-		}
-		_, err := p.client.DNS.Records.Delete(ctx, s, dns.RecordDeleteParams{ZoneID: cloudflare.F(zone)})
-		if err != nil {
-			return nil, fmt.Errorf("error deleting record %s: %w", rr.Name, err)
-		}
-		// Remove from record cache
-		delete(p.recordCache, rr.Name)
-
+	getZone, err := p.cache.getZone(zone)
+	if err != nil {
+		return nil, fmt.Errorf("error getting zone %s: %w", zone, err)
 	}
-	return recs, nil
+	r := make([]libdns.Record, 0, len(recs))
+	for _, rec := range recs {
+		getRecord, err := getZone.getRecord(rec.RR().Name, rec.RR().Type)
+		if err != nil {
+			return nil, fmt.Errorf("error getting record %s: %w", rec.RR().Name, err)
+		}
+		res, err := p.client.DNS.Records.Delete(ctx, getRecord.id, dns.RecordDeleteParams{ZoneID: cloudflare.F(getZone.id)})
+		if err != nil {
+			return nil, fmt.Errorf("error deleting record %s: %w", rec.RR().Name, err)
+		}
+		err = getZone.deleteRecord(res.ID)
+		if err != nil {
+			return nil, fmt.Errorf("error deleting record %s from cache: %w", rec.RR().Name, err)
+		}
+		r = append(r, libdns.RR{
+			Name: rec.RR().Name,
+			TTL:  rec.RR().TTL,
+			Type: rec.RR().Type,
+			Data: rec.RR().Data,
+		})
+	}
+	return r, nil
 }
 
 func (p *Provider) SetRecords(ctx context.Context, zone string, recs []libdns.Record) ([]libdns.Record, error) {
-	for _, rec := range recs {
-		rr := rec.RR()
-		zoneId, ok := p.zoneCache[zone]
-		if !ok {
-			_, err := p.ListZones(ctx)
-			if err != nil {
-				return nil, fmt.Errorf("error listing zones: %w", err)
-			}
-			zoneId, ok = p.zoneCache[zone]
-			if !ok {
-				return nil, fmt.Errorf("zone not found: %s", zone)
-			}
-		}
-		res, err := p.client.DNS.Records.List(ctx, dns.RecordListParams{
-			ZoneID: cloudflare.F(zoneId),
-			Name: cloudflare.F(dns.RecordListParamsName{
-				Exact: cloudflare.F(rr.Name),
-			}),
-			Type: cloudflare.F(dns.RecordListParamsType(rr.Type)),
-		})
-		if err != nil {
-			return nil, fmt.Errorf("error listing records for zone %s zoneId: %w", zone, err)
-		}
-		switch len(res.Result) {
-		case 0:
-			if rr.Data == "" {
-				continue
-			}
-			body, err := p.getParam(rr)
-			if err != nil {
-				return nil, fmt.Errorf("error creating new record param for %s: %w", rr.Name, err)
-			}
-			response, err := p.client.DNS.Records.New(ctx, dns.RecordNewParams{
-				ZoneID: cloudflare.F(zoneId),
-				Body:   body.(dns.RecordNewParamsBodyUnion),
-			})
-			if err != nil {
-				return nil, fmt.Errorf("error creating record %s zoneId in zone %s zoneId: %w", rr.Name, zone, err)
-			}
-			p.recordCache[rr.Name] = response.ID
-		case 1:
-			if rr.Data == "" {
-				_, err := p.DeleteRecords(ctx, zone, recs)
-				if err != nil {
-					return nil, fmt.Errorf("error deleting record %s zoneId in zone %s zoneId: %w", rr.Name, zone, err)
-				}
-				continue
-			}
-			body, err := p.getParam(rr)
-			if err != nil {
-				return nil, fmt.Errorf("error creating update record param for %s: %w", rr.Name, err)
-			}
-			update, err := p.client.DNS.Records.Update(ctx, res.Result[0].ID, dns.RecordUpdateParams{
-				ZoneID: cloudflare.F(zoneId),
-				Body:   body.(dns.RecordUpdateParamsBodyUnion),
-			})
-			if err != nil {
-				return nil, fmt.Errorf("error updating record %s zoneId in zone %s zoneId: %w", rr.Name, zone, err)
-			}
-			p.recordCache[rr.Name] = update.ID
-		default:
-			return nil, fmt.Errorf("multiple records found for %s zoneId in zone %s zoneId", rr.Name, zone)
+	zoneCache, err := p.cache.getZone(zone)
+	if err != nil {
+		return nil, fmt.Errorf("error getting zone %s: %w", zone, err)
 
+	}
+	r := make([]libdns.Record, 0, len(recs))
+	for _, rec := range recs {
+		param, err := p.getParam(rec)
+		if err != nil {
+			return nil, fmt.Errorf("error getting parameters for record %s: %w", rec.RR().Name, err)
 		}
+		recordCache, err := zoneCache.getRecord(rec.RR().Name, rec.RR().Type)
+		if err != nil {
+			// Record does not exist, create it
+			res, err := p.client.DNS.Records.New(ctx, dns.RecordNewParams{
+				ZoneID: cloudflare.F(zoneCache.id),
+				Body:   param.(dns.RecordNewParamsBodyUnion),
+			})
+			if err != nil {
+				return nil, fmt.Errorf("error creating record %s: %w", rec.RR().Name, err)
+			}
+			zoneCache.addRecord(&record{
+				id:      res.ID,
+				content: res.Content,
+				name:    res.Name,
+				dnsType: string(res.Type),
+				ttl:     time.Duration(res.TTL),
+			})
+			r = append(r, libdns.RR{
+				Name: res.Name,
+				TTL:  time.Duration(res.TTL),
+				Type: string(res.Type),
+				Data: res.Content,
+			})
+		} else {
+			res, err := p.client.DNS.Records.Update(ctx, recordCache.id, dns.RecordUpdateParams{
+				ZoneID: cloudflare.F(zoneCache.id),
+				Body:   param.(dns.RecordUpdateParamsBodyUnion),
+			})
+			if err != nil {
+				return nil, fmt.Errorf("error updating record %s: %w", rec.RR().Name, err)
+			}
+			err = zoneCache.updateRecordById(&record{
+				id:      res.ID,
+				content: res.Content,
+				name:    res.Name,
+				dnsType: string(res.Type),
+				ttl:     time.Duration(res.TTL),
+			})
+			if err != nil {
+				return nil, fmt.Errorf("error updating record %s in cache: %w", rec.RR().Name, err)
+			}
+			r = append(r, libdns.RR{
+				Name: res.Name,
+				TTL:  time.Duration(res.TTL),
+				Type: string(res.Type),
+				Data: res.Content,
+			})
+		}
+	}
+	return r, nil
+}
+
+func (p *Provider) GetRecords(_ context.Context, zone string) ([]libdns.Record, error) {
+	getZone, err := p.cache.getZone(zone)
+	if err != nil {
+		return nil, fmt.Errorf("error getting zone %s: %w", zone, err)
+	}
+	records := getZone.getAllRecords()
+	recs := make([]libdns.Record, 0, len(records))
+	for _, r := range records {
+		recs = append(recs, libdns.RR{
+			Name: r.name,
+			TTL:  r.ttl,
+			Type: r.dnsType,
+			Data: r.content,
+		})
 
 	}
 	return recs, nil
-}
-
-func (p *Provider) GetRecords(ctx context.Context, zone string) ([]libdns.Record, error) {
-
-	if zi, ok := p.zoneCache[zone]; ok {
-		res, err := p.client.DNS.Records.List(ctx, dns.RecordListParams{ZoneID: cloudflare.F(zi)})
-		if err != nil {
-			return nil, fmt.Errorf("error listing records for zone %s: %w", zone, err)
-		}
-		records := make([]libdns.Record, 0, len(res.Result))
-		for _, rec := range res.Result {
-
-			records = append(records, libdns.RR{
-				Name: rec.Name,
-				TTL:  time.Duration(rec.TTL) * time.Second,
-				Type: string(rec.Type),
-				Data: rec.Content,
-			})
-			p.recordCache[rec.Name] = rec.ID
-		}
-		return records, nil
-	} else {
-		return nil, fmt.Errorf("zone not found: %s", zone)
-	}
 }
 
 func (p *Provider) AppendRecords(ctx context.Context, zone string, recs []libdns.Record) ([]libdns.Record, error) {
-	for _, rec := range recs {
-		s, ok := p.zoneCache[zone]
-		if !ok {
-			_, err := p.ListZones(ctx)
-			if err != nil {
-				return nil, fmt.Errorf("error listing zones: %w", err)
-			}
-			s, ok = p.zoneCache[zone]
-			if !ok {
-				return nil, fmt.Errorf("zone not found: %s", zone)
-			}
-		}
-		body, e := p.getParam(rec)
-		rr := rec.RR()
-		if e != nil {
-			return nil, fmt.Errorf("error creating new record param for %s: %w", rr.Name, e)
-		}
-		rrr, err := p.client.DNS.Records.New(ctx, dns.RecordNewParams{
-			ZoneID: cloudflare.F(s),
-			Body:   body.(dns.RecordNewParamsBodyUnion),
-		})
-		p.recordCache[rr.Name] = rrr.ID
-		if err != nil {
-			return nil, fmt.Errorf("error creating record %s: %w", rr.Name, err)
-		}
+	zoneCache, err := p.cache.getZone(zone)
+	if err != nil {
+		return nil, fmt.Errorf("error getting zone %s: %w", zone, err)
 	}
-	return recs, nil
+	r := make([]libdns.Record, 0, len(recs))
+	for _, rec := range recs {
+		_, err := zoneCache.getRecord(rec.RR().Name, rec.RR().Type)
+		if err == nil {
+			return nil, fmt.Errorf("record %s already exists in zone %s", rec.RR().Name, zone)
+
+		}
+		param, err := p.getParam(rec)
+		if err != nil {
+			return nil, fmt.Errorf("error getting parameters for record %s: %w", rec.RR().Name, err)
+		}
+		res, err := p.client.DNS.Records.New(ctx, dns.RecordNewParams{
+			ZoneID: cloudflare.F(zoneCache.id),
+			Body:   param.(dns.RecordNewParamsBodyUnion),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("error creating record %s: %w", rec.RR().Name, err)
+		}
+		zoneCache.addRecord(&record{
+			id:      res.ID,
+			content: res.Content,
+			name:    res.Name,
+			dnsType: string(res.Type),
+			ttl:     time.Duration(res.TTL),
+		})
+		r = append(r, libdns.RR{
+			Name: res.Name,
+			TTL:  time.Duration(res.TTL),
+			Type: string(res.Type),
+			Data: res.Content,
+		})
+
+	}
+	return r, nil
+
 }
 
 func (p *Provider) getParam(r libdns.Record) (interface{}, error) {
@@ -216,3 +255,10 @@ func (p *Provider) getParam(r libdns.Record) (interface{}, error) {
 		return nil, fmt.Errorf("unsupported record type: %s", r.RR().Type)
 	}
 }
+
+var (
+	_ libdns.ZoneLister    = (*Provider)(nil)
+	_ libdns.RecordDeleter = (*Provider)(nil)
+	_ libdns.RecordSetter  = (*Provider)(nil)
+	_ libdns.RecordGetter  = (*Provider)(nil)
+)
