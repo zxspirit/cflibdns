@@ -7,23 +7,13 @@ import (
 	"testing"
 )
 
-var provider *Provider
-
-func init() {
-	var err error
-	provider, err = New()
-	if err != nil {
-		panic("failed to create provider: " + err.Error())
-	}
-}
 func TestProvider_InitCache(t *testing.T) {
-
+	provider := New()
 	type args struct {
 		ctx context.Context
 	}
 	tests := []struct {
-		name string
-
+		name    string
 		args    args
 		wantErr bool
 	}{
@@ -40,7 +30,7 @@ func TestProvider_InitCache(t *testing.T) {
 }
 
 func TestProvider_ListZones(t *testing.T) {
-
+	provider := New()
 	type args struct {
 		in0 context.Context
 	}
@@ -67,6 +57,10 @@ func TestProvider_ListZones(t *testing.T) {
 }
 
 func TestProvider_SetRecords(t *testing.T) {
+	provider := New()
+	if err := provider.InitCache(context.Background()); err != nil {
+		t.Fatalf("InitCache() error = %v", err)
+	}
 
 	type args struct {
 		ctx  context.Context
@@ -110,6 +104,10 @@ func TestProvider_SetRecords(t *testing.T) {
 }
 
 func TestProvider_AppendRecords(t *testing.T) {
+	provider := New()
+	if err := provider.InitCache(context.Background()); err != nil {
+		t.Fatalf("InitCache() error = %v", err)
+	}
 
 	type args struct {
 		ctx  context.Context
@@ -154,6 +152,10 @@ func TestProvider_AppendRecords(t *testing.T) {
 }
 
 func TestProvider_DeleteRecords(t *testing.T) {
+	provider := New()
+	if err := provider.InitCache(context.Background()); err != nil {
+		t.Fatalf("InitCache() error = %v", err)
+	}
 
 	type args struct {
 		ctx  context.Context

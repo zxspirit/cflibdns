@@ -20,11 +20,13 @@ type cache struct {
 	mu    sync.RWMutex
 }
 
-func (c *cache) addZone(z *zone) {
+func (c *cache) setZones(zones []*zone) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	z.name = formatDomain(z.name)
-	c.zones = append(c.zones, z)
+	for _, z := range zones {
+		z.name = formatDomain(z.name)
+	}
+	c.zones = zones
 }
 func (c *cache) getAllZones() []*zone {
 	c.mu.RLock()
@@ -53,6 +55,14 @@ func (z *zone) getAllRecords() []*record {
 	z.mu.RLock()
 	defer z.mu.RUnlock()
 	return z.records
+}
+func (z *zone) setRecords(records []*record) {
+	z.mu.Lock()
+	defer z.mu.Unlock()
+	for _, r := range records {
+		r.name = formatDomain(r.name)
+	}
+	z.records = records
 }
 
 func (z *zone) addRecord(record *record) {

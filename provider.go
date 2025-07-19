@@ -13,17 +13,12 @@ import (
 )
 
 // New creates a new Provider instance with a Cloudflare client and caches for zones and records.
-func New() (*Provider, error) {
+func New() *Provider {
 
-	p := &Provider{
+	return &Provider{
 		client: cloudflare.NewClient(option.WithAPIToken(os.Getenv("CLOUDFLARE_API_TOKEN"))),
-		cache:  cache{make([]*zone, 0)},
+		cache:  cache{zones: make([]*zone, 0)},
 	}
-	if err := p.InitCache(context.Background()); err != nil {
-		return nil, fmt.Errorf("error initializing cache: %w", err)
-	}
-
-	return p, nil
 }
 
 type Provider struct {
@@ -36,22 +31,26 @@ func (p *Provider) InitCache(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("error listing zones: %w", err)
 	}
+	zs := make([]*zone, 0, len(res.Result))
 	for _, z := range res.Result {
-		records := make([]*record, 0)
-		z2 := &zone{
+		zs = append(zs, &zone{
 			id:      z.ID,
 			name:    z.Name,
-			records: records,
-		}
-		p.cache.addZone(z2)
+			records: make([]*record, 0),
+		})
+	}
+	p.cache.setZones(zs)
+	for _, z := range zs {
 		list, err := p.client.DNS.Records.List(ctx, dns.RecordListParams{
-			ZoneID: cloudflare.F(z.ID),
+			ZoneID: cloudflare.F(z.id),
 		})
 		if err != nil {
-			return fmt.Errorf("error listing records for zone %s: %w", z.Name, err)
+			return fmt.Errorf("error listing records for zone %s: %w", z.name, err)
 		}
+		rs := make([]*record, 0, len(list.Result))
+
 		for _, rec := range list.Result {
-			z2.addRecord(&record{
+			rs = append(rs, &record{
 				id:      rec.ID,
 				content: rec.Content,
 				name:    rec.Name,
@@ -59,6 +58,7 @@ func (p *Provider) InitCache(ctx context.Context) error {
 				ttl:     time.Duration(rec.TTL),
 			})
 		}
+		z.setRecords(rs)
 	}
 	return nil
 }
