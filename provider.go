@@ -115,6 +115,9 @@ func (p *Provider) SetRecords(ctx context.Context, zone string, recs []libdns.Re
 		}
 		recordCache, err := zoneCache.getRecord(rec.RR().Name, rec.RR().Type)
 		if err != nil {
+			if rec.RR().Data == "" {
+				continue // Skip if the record data is empty
+			}
 			// Record does not exist, create it
 			res, err := p.client.DNS.Records.New(ctx, dns.RecordNewParams{
 				ZoneID: cloudflare.F(zoneCache.id),
@@ -137,6 +140,18 @@ func (p *Provider) SetRecords(ctx context.Context, zone string, recs []libdns.Re
 				Data: res.Content,
 			})
 		} else {
+			if rec.RR().Data == "" {
+				// If the record exists but data is empty, delete it
+				res, err := p.client.DNS.Records.Delete(ctx, recordCache.id, dns.RecordDeleteParams{ZoneID: cloudflare.F(zoneCache.id)})
+				if err != nil {
+					return nil, fmt.Errorf("error deleting record %s: %w", rec.RR().Name, err)
+				}
+				err = zoneCache.deleteRecord(res.ID)
+				if err != nil {
+					return nil, fmt.Errorf("error deleting record %s from cache: %w", rec.RR().Name, err)
+				}
+				continue // Skip to the next record
+			}
 			res, err := p.client.DNS.Records.Update(ctx, recordCache.id, dns.RecordUpdateParams{
 				ZoneID: cloudflare.F(zoneCache.id),
 				Body:   param.(dns.RecordUpdateParamsBodyUnion),
