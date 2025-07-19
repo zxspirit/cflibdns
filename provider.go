@@ -1,4 +1,4 @@
-package provider
+package cflibdns
 
 import (
 	"context"
@@ -8,22 +8,25 @@ import (
 	"github.com/cloudflare/cloudflare-go/v4/option"
 	"github.com/cloudflare/cloudflare-go/v4/zones"
 	"github.com/libdns/libdns"
+	"github.com/sirupsen/logrus"
 	"os"
 	"time"
 )
 
 // New creates a new Provider instance with a Cloudflare client and caches for zones and records.
-func New() *Provider {
+func New(logger *logrus.Logger) *Provider {
 
 	return &Provider{
 		client: cloudflare.NewClient(option.WithAPIToken(os.Getenv("CLOUDFLARE_API_TOKEN"))),
 		cache:  cache{zones: make([]*zone, 0)},
+		logger: logger,
 	}
 }
 
 type Provider struct {
 	client *cloudflare.Client
 	cache  cache
+	logger *logrus.Logger
 }
 
 func (p *Provider) InitCache(ctx context.Context) error {
@@ -60,6 +63,7 @@ func (p *Provider) InitCache(ctx context.Context) error {
 		}
 		z.setRecords(rs)
 	}
+	p.logger.Info("cache initialized with zones and records")
 	return nil
 }
 
@@ -69,6 +73,7 @@ func (p *Provider) ListZones(_ context.Context) ([]libdns.Zone, error) {
 	for _, zc := range allZones {
 		z = append(z, libdns.Zone{Name: zc.name})
 	}
+	p.logger.Info("zones retrieved: ", z)
 	return z, nil
 }
 
@@ -98,6 +103,7 @@ func (p *Provider) DeleteRecords(ctx context.Context, zone string, recs []libdns
 			Data: rec.RR().Data,
 		})
 	}
+	p.logger.Infof("deleted records: %v", r)
 	return r, nil
 }
 
@@ -111,7 +117,7 @@ func (p *Provider) SetRecords(ctx context.Context, zone string, recs []libdns.Re
 	for _, rec := range recs {
 		param, err := p.getParam(rec)
 		if err != nil {
-			return nil, fmt.Errorf("error getting parameters for record %s: %w", rec.RR().Name, err)
+			return nil, fmt.Errorf("error getting parameters for record %s", rec.RR().Name)
 		}
 		recordCache, err := zoneCache.getRecord(rec.RR().Name, rec.RR().Type)
 		if err != nil {
@@ -119,9 +125,13 @@ func (p *Provider) SetRecords(ctx context.Context, zone string, recs []libdns.Re
 				continue // Skip if the record data is empty
 			}
 			// Record does not exist, create it
+			union, ok := param.(dns.RecordNewParamsBodyUnion)
+			if !ok {
+				return nil, fmt.Errorf("error casting parameters for record %s: %w", rec.RR().Name, err)
+			}
 			res, err := p.client.DNS.Records.New(ctx, dns.RecordNewParams{
 				ZoneID: cloudflare.F(zoneCache.id),
-				Body:   param.(dns.RecordNewParamsBodyUnion),
+				Body:   union,
 			})
 			if err != nil {
 				return nil, fmt.Errorf("error creating record %s: %w", rec.RR().Name, err)
@@ -150,6 +160,7 @@ func (p *Provider) SetRecords(ctx context.Context, zone string, recs []libdns.Re
 				if err != nil {
 					return nil, fmt.Errorf("error deleting record %s from cache: %w", rec.RR().Name, err)
 				}
+				p.logger.Infof("deleted record %s as data is empty", rec.RR().Name)
 				continue // Skip to the next record
 			}
 			res, err := p.client.DNS.Records.Update(ctx, recordCache.id, dns.RecordUpdateParams{
@@ -175,8 +186,10 @@ func (p *Provider) SetRecords(ctx context.Context, zone string, recs []libdns.Re
 				Type: string(res.Type),
 				Data: res.Content,
 			})
+			p.logger.Infof("updated record %s", rec.RR().Name)
 		}
 	}
+	p.logger.Infof("set records: %v", r)
 	return r, nil
 }
 
@@ -196,6 +209,7 @@ func (p *Provider) GetRecords(_ context.Context, zone string) ([]libdns.Record, 
 		})
 
 	}
+	p.logger.Infof("records retrieved for zone %s: %v", zone, recs)
 	return recs, nil
 }
 
@@ -215,9 +229,13 @@ func (p *Provider) AppendRecords(ctx context.Context, zone string, recs []libdns
 		if err != nil {
 			return nil, fmt.Errorf("error getting parameters for record %s: %w", rec.RR().Name, err)
 		}
+		union, ok := param.(dns.RecordNewParamsBodyUnion)
+		if !ok {
+			return nil, fmt.Errorf("error casting parameters for record %s", rec.RR().Name)
+		}
 		res, err := p.client.DNS.Records.New(ctx, dns.RecordNewParams{
 			ZoneID: cloudflare.F(zoneCache.id),
-			Body:   param.(dns.RecordNewParamsBodyUnion),
+			Body:   union,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("error creating record %s: %w", rec.RR().Name, err)
@@ -237,6 +255,7 @@ func (p *Provider) AppendRecords(ctx context.Context, zone string, recs []libdns
 		})
 
 	}
+	p.logger.Infof("appended records: %v", r)
 	return r, nil
 
 }

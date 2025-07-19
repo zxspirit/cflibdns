@@ -1,14 +1,15 @@
-package provider
+package cflibdns
 
 import (
 	"context"
 	"github.com/libdns/libdns"
+	"github.com/sirupsen/logrus"
 	"reflect"
 	"testing"
 )
 
 func TestProvider_InitCache(t *testing.T) {
-	provider := New()
+	provider := New(logrus.New())
 	type args struct {
 		ctx context.Context
 	}
@@ -30,7 +31,7 @@ func TestProvider_InitCache(t *testing.T) {
 }
 
 func TestProvider_ListZones(t *testing.T) {
-	provider := New()
+	provider := New(logrus.New())
 	type args struct {
 		in0 context.Context
 	}
@@ -57,7 +58,7 @@ func TestProvider_ListZones(t *testing.T) {
 }
 
 func TestProvider_SetRecords(t *testing.T) {
-	provider := New()
+	provider := New(logrus.New())
 	if err := provider.InitCache(context.Background()); err != nil {
 		t.Fatalf("InitCache() error = %v", err)
 	}
@@ -80,7 +81,7 @@ func TestProvider_SetRecords(t *testing.T) {
 				Name: "test.newzhxu.com",
 				TTL:  1,
 				Type: "A",
-				Data: "1.1.1.4",
+				Data: "",
 			}},
 		}, []libdns.Record{libdns.RR{
 			Name: "test.newzhxu.com",
@@ -104,7 +105,7 @@ func TestProvider_SetRecords(t *testing.T) {
 }
 
 func TestProvider_AppendRecords(t *testing.T) {
-	provider := New()
+	provider := New(logrus.New())
 	if err := provider.InitCache(context.Background()); err != nil {
 		t.Fatalf("InitCache() error = %v", err)
 	}
@@ -152,7 +153,7 @@ func TestProvider_AppendRecords(t *testing.T) {
 }
 
 func TestProvider_DeleteRecords(t *testing.T) {
-	provider := New()
+	provider := New(logrus.New())
 	if err := provider.InitCache(context.Background()); err != nil {
 		t.Fatalf("InitCache() error = %v", err)
 	}

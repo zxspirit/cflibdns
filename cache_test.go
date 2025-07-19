@@ -1,11 +1,12 @@
-package provider
+package cflibdns
 
 import (
+	"github.com/sirupsen/logrus"
 	"testing"
 )
 
 func Test_cache_addZone(t *testing.T) {
-	provider := New()
+	provider := New(logrus.New())
 
 	type args struct {
 		z []*zone
