@@ -36,6 +36,7 @@ func (c *cache) getAllZones() []*zone {
 func (c *cache) getZone(name string) (*zone, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	name = formatDomain(name)
 	for _, z := range c.zones {
 		if z.name == name {
 			return z, nil
@@ -74,6 +75,7 @@ func (z *zone) addRecord(record *record) {
 func (z *zone) getRecord(name string, recordType string) (*record, error) {
 	z.mu.RLock()
 	defer z.mu.RUnlock()
+	name = formatDomain(name)
 	for _, rec := range z.records {
 		if rec.name == name && rec.dnsType == recordType {
 			return rec, nil
