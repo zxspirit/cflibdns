@@ -86,7 +86,7 @@ func (p *Provider) DeleteRecords(ctx context.Context, zone string, recs []libdns
 	for _, rec := range recs {
 		getRecord, err := getZone.getRecord(rec.RR().Name, rec.RR().Type)
 		if err != nil {
-			return nil, fmt.Errorf("error getting record %s: %w", rec.RR().Name, err)
+			continue
 		}
 		res, err := p.client.DNS.Records.Delete(ctx, getRecord.id, dns.RecordDeleteParams{ZoneID: cloudflare.F(getZone.id)})
 		if err != nil {
@@ -223,7 +223,6 @@ func (p *Provider) AppendRecords(ctx context.Context, zone string, recs []libdns
 		_, err := zoneCache.getRecord(rec.RR().Name, rec.RR().Type)
 		if err == nil {
 			return nil, fmt.Errorf("record %s already exists in zone %s", rec.RR().Name, zone)
-
 		}
 		param, err := p.getParam(rec)
 		if err != nil {
